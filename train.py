@@ -14,7 +14,8 @@ from utils import arg_util, misc
 from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
 from utils.misc import auto_resume
-
+from utils.wandb_util import *
+import utils.wandb_util as wandb_util
 
 def build_everything(args: arg_util.Args):
     # resume
@@ -81,7 +82,7 @@ def build_everything(args: arg_util.Args):
     from trainer import VARTrainer
     from utils.amp_sc import AmpOptimizer
     from utils.lr_control import filter_params
-    
+
     vae_local, var_wo_ddp = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,        # hard-coded VQVAE hyperparameters
         device=dist.get_device(), patch_nums=args.patch_nums,
@@ -90,13 +91,22 @@ def build_everything(args: arg_util.Args):
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
     
-    vae_ckpt = 'vae_ch160v4096z32.pth'
+    #vae_ckpt = 'vae_ch160v4096z32.pth'
+    vae_ckpt, var_ckpt = 'vae_ch160v4096z32.pth', f'var_d{args.depth}.pth'
+    
     if dist.is_local_master():
+
+        wandb_util.wandb.init(project="FreqVAR", name=args.exp_name, config={})
+
         if not os.path.exists(vae_ckpt):
             os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
+        if not os.path.exists(var_ckpt):
+            os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{var_ckpt}')
+
     dist.barrier()
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
-    
+    var_wo_ddp.load_state_dict(torch.load(var_ckpt, map_location='cpu'), strict=True)
+
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
     var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
@@ -131,7 +141,7 @@ def build_everything(args: arg_util.Args):
     trainer = VARTrainer(
         device=args.device, patch_nums=args.patch_nums, resos=args.resos,
         vae_local=vae_local, var_wo_ddp=var_wo_ddp, var=var,
-        var_opt=var_optim, label_smooth=args.ls,
+        var_opt=var_optim, label_smooth=args.ls,alpha = args.alpha
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=False, skip_vae=True) # don't load vae again
@@ -185,7 +195,10 @@ def main_training():
     best_val_loss_mean, best_val_loss_tail, best_val_acc_mean, best_val_acc_tail = 999, 999, -1, -1
     
     L_mean, L_tail = -1, -1
+    print("start_ep", start_ep)
+    print("total_ep",args.ep)
     for ep in range(start_ep, args.ep):
+        print("#"*20,"ep",ep)
         if hasattr(ld_train, 'sampler') and hasattr(ld_train.sampler, 'set_epoch'):
             ld_train.sampler.set_epoch(ep)
             if ep < 3:

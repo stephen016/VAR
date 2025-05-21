@@ -2,6 +2,15 @@ import torch
 from torch import nn as nn
 from torch.nn import functional as F
 
+def argmax_with_top_1(logits_BlV: torch.Tensor) -> torch.Tensor:
+    B, l, V = logits_BlV.shape
+    top_k = 1
+
+    idx_to_remove = logits_BlV < logits_BlV.topk(top_k, largest=True, sorted=False, dim=-1)[0].amin(dim=-1, keepdim=True)
+    logits_BlV.masked_fill_(idx_to_remove, -torch.inf)
+
+    # Instead of sampling, take the argmax after softmax (equivalent to just argmax of logits)
+    return logits_BlV.argmax(dim=-1).view(B, l, 1)  # shape: (B, l,1)
 
 def sample_with_top_k_top_p_(logits_BlV: torch.Tensor, top_k: int = 0, top_p: float = 0.0, rng=None, num_samples=1) -> torch.Tensor:  # return idx, shaped (B, l)
     B, l, V = logits_BlV.shape

@@ -8,7 +8,7 @@ from huggingface_hub import PyTorchModelHubMixin
 
 import dist
 from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
-from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
+from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_,argmax_with_top_1
 from models.vqvae import VQVAE, VectorQuantizer2
 
 
@@ -179,6 +179,58 @@ class VAR(nn.Module):
                 gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+            f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
+                next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
+                next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+        
+        for b in self.blocks: b.attn.kv_caching(False)
+        return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
+    
+    def gradient_autoregressive_infer_cfg(
+        self,
+        B,
+        logits,
+        label_B,
+
+    ):
+        if label_B is None:
+            label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
+        elif isinstance(label_B, int):
+            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
+        print("label_B in gradient_autoregressive_infer_cfg",label_B)
+        
+        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
+        next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
+        cur_L = 0 
+        f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+        
+        for b in self.blocks: b.attn.kv_caching(True)
+
+        counter = 0
+        for si, pn in enumerate(self.patch_nums):   # si: i-th segment
+            print("pn",pn)
+            cur_L += pn*pn
+            logits_BlV = logits[:,counter:(counter+pn*pn), :]
+            counter += pn*pn
+            #ratio = si / self.num_stages_minus_1
+            #cfg = 2
+            #t = cfg * ratio
+            #print("logits_BlV",logits_BlV.shape)
+            #print("logits_BlV[:B]",logits_BlV[:B].shape)
+            #print("t",t)
+            #logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
+            idx_Bl = argmax_with_top_1(logits_BlV)[:, :, 0]
+            h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+
+            #if not more_smooth: # this is the default case
+            #    h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+            #else:   # not used when evaluating FID/IS/Precision/Recall
+            #    gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
+            #    h_BChw = gumbel_softmax_with_rng(logits_BLV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
             f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
             if si != self.num_stages_minus_1:   # prepare for next stage

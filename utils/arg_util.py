@@ -110,6 +110,9 @@ class Args(Tap):
     tf32: bool = True       # whether to use TensorFloat32
     device: str = 'cpu'     # [automatically set; don't specify this]
     seed: int = None        # seed
+    alpha: float = 0.01      # alpha for frequency loss
+    exp_name: str = 'text'  # experiment name
+    
     def seed_everything(self, benchmark: bool):
         torch.backends.cudnn.enabled = True
         torch.backends.cudnn.benchmark = benchmark

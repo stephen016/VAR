@@ -10,6 +10,10 @@ import dist
 from models import VAR, VQVAE, VectorQuantizer2
 from utils.amp_sc import AmpOptimizer
 from utils.misc import MetricLogger, TensorboardLogger
+from utils.freq_util import *
+from utils.wandb_util import *
+import utils.wandb_util as wandb_util
+import wandb
 
 Ten = torch.Tensor
 FTen = torch.Tensor
@@ -22,6 +26,7 @@ class VARTrainer(object):
         self, device, patch_nums: Tuple[int, ...], resos: Tuple[int, ...],
         vae_local: VQVAE, var_wo_ddp: VAR, var: DDP,
         var_opt: AmpOptimizer, label_smooth: float,
+        alpha: float = 0.01
     ):
         super(VARTrainer, self).__init__()
         
@@ -50,6 +55,8 @@ class VARTrainer(object):
         self.prog_it = 0
         self.last_prog_si = -1
         self.first_prog = True
+        self.mse_loss = nn.MSELoss(reduction='mean')
+        self.alpha = alpha
     
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
@@ -109,7 +116,15 @@ class VARTrainer(object):
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
             logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+            print("logits_BLV",logits_BLV.shape)
+            print("gt_BL",gt_BL.shape)
+            print("label_B",label_B.shape)
+
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
+
+            img = self.var_wo_ddp.gradient_autoregressive_infer_cfg(B,logits_BLV,label_B)
+            print(img.shape)
+            #print("first_loss",loss)
             if prog_si >= 0:    # in progressive training
                 bg, ed = self.begin_ends[prog_si]
                 assert logits_BLV.shape[1] == gt_BL.shape[1] == ed
@@ -118,10 +133,68 @@ class VARTrainer(object):
             else:               # not in progressive training
                 lw = self.loss_weight
             loss = loss.mul(lw).sum(dim=-1).mean()
+            print("second_loss",loss.item())
         
-        # backward
+            #TODO add frequency loss
+            output_freq = []
+            freq_list = []
+            for c in range(len(label_B)):
+                freq_outp = image_fft(img[c].unsqueeze(0).to(torch.float32))
+                output_freq.append(freq_outp)
+                if (label_B[c]==0):
+                    freq_tgt = low_pass_filter(inp_B3HW[c].to(torch.float32).unsqueeze(0), only_freq=True, radius_ratio=0.25)
+                    # freq_tgt = apply_3_stripe_mask(inp_B3HW[c].to(torch.float32).unsqueeze(0))
+                    # freq_tgt = low_pass_filter_channel(inp_B3HW[c].to(torch.float32).unsqueeze(0), only_freq=True)
+                # freq_tgt = frequency_square_injection(inp_B3HW[c].to(torch.float32).unsqueeze(0), only_freq=True)
+
+                    freq_list.append(freq_tgt)
+
+                else:
+                    freq_tgt = image_fft(inp_B3HW[c].unsqueeze(0).to(torch.float32))
+                    freq_list.append(freq_tgt)
+            freq_tgt_tensor = torch.stack(freq_list)
+            freq_out_tensor = torch.stack(output_freq)
+
+            mseloss = self.mse_loss(torch.log1p(freq_tgt_tensor), torch.log1p(freq_out_tensor))
+            # backward
+            print("mseloss",mseloss.item())
+            print("loss",loss.item())
+            loss_dict = {"freq_loss": mseloss.item(),
+                        "image_loss": loss.item()}
+            wandb_util.log_dict(loss_dict, commit=True)
+            loss = loss+ self.alpha * mseloss
+            print("combined_loss",loss.item())
+
+        # save images
+        freq_clone = freq_tgt_tensor.detach()
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)
         
+
+        # upload to wandb
+        if g_it % 50 == 0:
+            for i, (img_tensor, inp,  freq) in enumerate(zip(img, inp_B3HW, freq_clone)):
+                # Convert each image: (C, H, W) -> (H, W, C), scale to 0–255
+                # print(f"img_tensor {img_tensor}")
+                # print(f"inp {inp}")
+                img_array = (((img_tensor.detach().cpu()+ 1) / 2).to(torch.float32).permute(1, 2, 0).cpu().detach().numpy() * 255).astype(np.uint8)
+                img_array_inp = (((inp.detach().cpu()+ 1) / 2).to(torch.float32).permute(1, 2, 0).cpu().detach().numpy() * 255).astype(np.uint8)
+                
+                freq_img = create_png_from_fft_magnitude(img_tensor.detach().to(torch.float32))
+                freq_tgt_img = create_png_from_fft_magnitude_2(freq.detach().to(torch.float32).squeeze(0))
+
+                # Convert to PIL Image
+                img_out = Image.fromarray(img_array)
+                img_inp = Image.fromarray(img_array_inp)
+                
+                # Save with a unique name
+                wandb_dict = {"train_output": wandb.Image(img_out), "train_gt": wandb.Image(img_inp),  "freq":wandb.Image(freq_img),"freq_tgt":wandb.Image(freq_tgt_img)}
+                # wandb_utils.log_image_2("train_output", img_out, it)
+                # wandb_utils.log_image_2("train_gt", img_inp, it)
+                # wandb_utils.log_image_2("train_gt_from_logits", img_gt, it)
+                wandb_util.log_dict(wandb_dict, commit=True)
+                del wandb_dict
+                if i == 2:
+                    break
         # log
         pred_BL = logits_BLV.data.argmax(dim=-1)
         if it == 0 or it in metric_lg.log_iters:
