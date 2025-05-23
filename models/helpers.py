@@ -2,13 +2,31 @@ import torch
 from torch import nn as nn
 from torch.nn import functional as F
 
+def sample_logits(logits_BlV: torch.Tensor) -> torch.Tensor:  # return idx, shaped (B, l)
+    logits = logits_BlV  # shape: [B, L, V]
+    B, l, V = logits_BlV.shape
+    temperature = 0.1  # lower = sharper
+    probs = (logits / temperature).softmax(dim=-1)
+    index_vals = torch.arange(logits.size(-1), device=logits.device).view(1, 1, -1)  # [1, 1, 2]
+    soft_argmax = (probs * index_vals).sum(dim=-1, keepdim=True)
+    return soft_argmax.view(B, l, 1)
+
+def sample_top1_gumbel(
+    logits_BlV: torch.Tensor,
+) -> torch.Tensor:
+    B, l, V = logits_BlV.shape
+
+    # Apply Gumbel-Softmax to sample top-1 with gradient flow
+    gumbel_output = F.gumbel_softmax(logits_BlV, tau=tau, hard=True, dim=-1)  # [B, l, V], one-hot output but gradient flows
+
+    return gumbel_output.view(B, l, 1)  # Differentiable one-hot tensor of shape [B, l, V]
+
 def argmax_with_top_1(logits_BlV: torch.Tensor) -> torch.Tensor:
     B, l, V = logits_BlV.shape
     top_k = 1
 
     idx_to_remove = logits_BlV < logits_BlV.topk(top_k, largest=True, sorted=False, dim=-1)[0].amin(dim=-1, keepdim=True)
     logits_BlV.masked_fill_(idx_to_remove, -torch.inf)
-
     # Instead of sampling, take the argmax after softmax (equivalent to just argmax of logits)
     return logits_BlV.argmax(dim=-1).view(B, l, 1)  # shape: (B, l,1)
 

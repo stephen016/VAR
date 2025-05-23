@@ -8,7 +8,7 @@ from huggingface_hub import PyTorchModelHubMixin
 
 import dist
 from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
-from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_,argmax_with_top_1
+from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_,argmax_with_top_1,sample_logits,sample_top1_gumbel
 from models.vqvae import VQVAE, VectorQuantizer2
 
 
@@ -216,21 +216,35 @@ class VAR(nn.Module):
             cur_L += pn*pn
             logits_BlV = logits[:,counter:(counter+pn*pn), :]
             counter += pn*pn
-            #ratio = si / self.num_stages_minus_1
-            #cfg = 2
+            ratio = si / self.num_stages_minus_1
+            cfg = 1.5
             #t = cfg * ratio
             #print("logits_BlV",logits_BlV.shape)
             #print("logits_BlV[:B]",logits_BlV[:B].shape)
             #print("t",t)
             #logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
-            idx_Bl = argmax_with_top_1(logits_BlV)[:, :, 0]
-            h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+            
+            #idx_Bl = sample_logits(logits_BlV)[:, :, 0]
+            #print("USE sample_logits")
+
+            #idx_Bl=  sample_top1_gumbel(logits_BlV)[:, :, 0]
+            #pint("use sample_top1_gumbel")
+
+            #idx_Bl = argmax_with_top_1(logits_BlV)[:, :, 0]
+            #print("use argmax_with_top_1")
+            
+            #print("idx_Bl",idx_Bl)
+            #print("idx_Bl",idx_Bl.shape)
+            #h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
 
             #if not more_smooth: # this is the default case
             #    h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
             #else:   # not used when evaluating FID/IS/Precision/Recall
             #    gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
             #    h_BChw = gumbel_softmax_with_rng(logits_BLV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
+            h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=None) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
             f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
             if si != self.num_stages_minus_1:   # prepare for next stage
@@ -239,6 +253,8 @@ class VAR(nn.Module):
                 next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         
         for b in self.blocks: b.attn.kv_caching(False)
+        print("f_hat",f_hat.shape)
+        print("f_hat_grad",f_hat.grad)
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV

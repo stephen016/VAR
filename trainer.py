@@ -116,14 +116,16 @@ class VARTrainer(object):
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
             logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
-            print("logits_BLV",logits_BLV.shape)
-            print("gt_BL",gt_BL.shape)
-            print("label_B",label_B.shape)
+            #print("logits_BLV",logits_BLV.shape)
+            #print("gt_BL",gt_BL.shape)
+            #print("label_B",label_B.shape)
 
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
 
             img = self.var_wo_ddp.gradient_autoregressive_infer_cfg(B,logits_BLV,label_B)
-            print(img.shape)
+            #print(img.shape)
+            #print("img.grad", img.grad)
+            #print("alpha",self.alpha)
             #print("first_loss",loss)
             if prog_si >= 0:    # in progressive training
                 bg, ed = self.begin_ends[prog_si]

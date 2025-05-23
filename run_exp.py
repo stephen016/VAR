@@ -30,7 +30,7 @@ def run(
       f'sbatch -J {exp_name} '
       f'-o {LOG_DIR}/%j_{exp_name}_.out '
       f'--partition={partition} '
-      f'--exclude=xe8545-a100-[06,18] '
+      f'--exclude=xe8545-a100-[06,12,18] '
       f'--time=2-00:00:00 '
       f'--gres=gpu:1 --wrap="bash /home/c01xuwa/CISPA-home/VAR/run_docker.sh --rdzv_endpoint 127.0.0.1:{random.randint(49152, 65535)} {command}"'
       #f'--gres=gpu:1 --wrap="bash /home/c01xuwa/CISPA-home/SPA-PT/script_cispa/run_docker.sh --rdzv_endpoint 127.0.0.1:{random.randint(49152, 65535)} /home/c01xuwa/CISPA-home/SPA-PT/scripts/train_prompt.py {command}"'
@@ -40,18 +40,18 @@ def run(
 bs = 16
 ep= 5
 alpha=0.01
-lr = 3e-3
+lr = 1e-4
 p_ratio = 0.5
 
 pn_dep_tuple = [
     #(512, 36),
-    #(256, 30),
+    (256, 30),
     (256,16)
 ]
 #for ep in [10,50]:
-for ep in [50]:
+for ep in [10,40]:
   for alpha in [0.001,0.01,0.05]:
-  #for alpha in [10]:
+  #for alpha in [1]:
     for p_ratio in [1,0.5,0.1]:
     #for p_ratio in [1,0.5]:
     #for p_ratio in [1]:
